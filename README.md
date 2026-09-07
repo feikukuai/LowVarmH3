@@ -65,11 +65,24 @@ python scripts/verify_and_generate.py            # 提交一个最小任务并�
 ```
 LowVarmH3/
 ├── launch-webui-linux.sh        # 关键修复版 Linux 启动脚本(3 个修复固化)
-├── pyproject.linux.patch        # MinimaxH3-ONNX → Linux 支持补丁
+├── patch-linux.sh               # MinimaxH3-ONNX → Linux 平台支持(pyproject)
 ├── scripts/
 │   └── verify_and_generate.py   # 端到端出片验证脚本(HTTP)
+├── frontend/
+│   ├── gradio_h3_simple.py      # 可跑通的 Gradio 前端(文生/首帧→视频, 端口7861)
+│   └── onnx_adapter.py          # ONNX 后端适配层(翻译成 7860 调用, AMD风格前端移植基座)
 └── docs/
     └── MODELS_AND_PATHS.md      # 模型下载源 + 放置路径 + 导出产物清单
 ```
 
 > 本仓库只包含「让 MinimaxH3-ONNX 在 Linux/低显存跑通」的补丁与脚本，**不包含模型文件**(几十 GB，请按 MODELS_AND_PATHS 下载)。
+
+## 四、Gradio 前端(可选)
+简单版(已验证可出片)：
+```bash
+cd <MinimaxH3-ONNX 目录>
+.venv/bin/python LowVarmH3/frontend/gradio_h3_simple.py \
+    --backend http://127.0.0.1:7860 --host 127.0.0.1 --port 7861
+# 打开 http://127.0.0.1:7861 即可在网页里改提示词/首帧/参数并生成视频
+```
+`onnx_adapter.py` 是把前端从 ComfyUI 换成 ONNX 的翻译层，供完整复刻版前端使用。
