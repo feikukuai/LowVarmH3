@@ -471,6 +471,78 @@ def progress_for_r2i(code_text):
         return "🟡 等待任务初始化…"
     return _nice_progress(v.get("status"))
 
+# ============ 内存上限设置(适配不同设备) ============
+# 后端由 run-h3-backend-24gb.sh 启动时会放进 /sys/fs/cgroup/h3backend
+# 这里提供在页面上动态调整该 cgroup 内存上限的能力(需 root / 已用 wrapper 启动)。
+H3_CGROUP = "/sys/fs/cgroup/h3backend"
+MEM_PRESETS = {"自动(不限制)": 0, "8 GB（轻量/老设备）": 8, "12 GB": 12,
+               "16 GB": 16, "20 GB": 20, "24 GB（推荐,T4/云）": 24,
+               "28 GB": 28, "32 GB": 32}
+
+def _cg(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+def _cg_write(path, val):
+    with open(path, "w") as f:
+        f.write(str(val))
+
+def _cgroup_available():
+    return os.path.isdir(H3_CGROUP) and os.access(H3_CGROUP + "/memory.max", os.W_OK)
+
+def get_mem_status():
+    """返回当前 cgroup 内存限制/用量的可读文本。"""
+    if not _cgroup_available():
+        return ("⚠️ 未检测到 h3backend cgroup。\n"
+                "请用 run-h3-backend-24gb.sh 启动后端，才能在此页调整内存上限。\n"
+                "（直接 ./launch-webui-linux.sh 启动则无 cgroup 内存控制）")
+    max_b = int(_cg(H3_CGROUP + "/memory.max") or 0)
+    high_b = int(_cg(H3_CGROUP + "/memory.high") or 0)
+    cur_b = int(_cg(H3_CGROUP + "/memory.current") or 0)
+    # anon
+    anon_b = 0
+    for ln in open(H3_CGROUP + "/memory.stat"):
+        k, v = ln.split()
+        if k == "anon":
+            anon_b = int(v)
+    g = 1024 ** 3
+    cur_g = cur_b / g
+    return (f"**后端 cgroup 内存限制**：\n"
+            f"- 硬上限 memory.max = {max_b/g:.1f} GB\n"
+            f"- 软限 memory.high = {high_b/g:.1f} GB\n"
+            f"- 当前用量 = {cur_g:.1f} GB（进程 anon = {anon_b/g:.1f} GB）\n"
+            f"- 提示：把上限调到**高于当前用量**再应用，否则可能触发后端 OOM。")
+
+def set_mem_limit(gb):
+    """把 h3backend cgroup 的 memory.max 设为 gb GB(0=不限制)。返回状态文本。"""
+    if not _cgroup_available():
+        return "⚠️ 后端未运行在 h3backend cgroup 中，无法设置。请用 run-h3-backend-24gb.sh 启动。"
+    g = 1024 ** 3
+    if gb and gb > 0:
+        max_b = gb * g
+        high_b = max(2 * g, max_b - 2 * g)   # soft limit 略低于硬限
+        try:
+            _cg_write(H3_CGROUP + "/memory.max", max_b)
+            if os.path.exists(H3_CGROUP + "/memory.high"):
+                _cg_write(H3_CGROUP + "/memory.high", high_b)
+            return f"✅ 已设置后端内存上限 = {gb} GB（high={high_b/g:.1f}G）"
+        except Exception as e:
+            return f"❌ 设置失败: {e}"
+    else:
+        # 0 = 不限制
+        try:
+            _cg_write(H3_CGROUP + "/memory.max", "max")
+            return "✅ 已设置为不限制内存"
+        except Exception as e:
+            return f"❌ 设置失败: {e}"
+
+def apply_mem_preset(label):
+    gb = MEM_PRESETS.get(str(label), 0)
+    return set_mem_limit(gb)
+
 def build():
     with gr.Blocks(title="MiniMax-H3 · ONNX 低显存") as demo:
         gr.Markdown("## MiniMax-H3 · ONNX 低显存 · ref2va 版\n"
@@ -570,6 +642,17 @@ def build():
             with gr.Tab("📋 任务 & 监控"):
                 gr.Markdown("个人使用：**在下方选进行中任务 → 点 ✕ 取消**；或点「✕ 取消最新」。取消后界面立即释放。")
                 sysmon_md = gr.Markdown("读取系统信息…")
+                with gr.Accordion("💾 后端内存上限设置（适配不同设备）", open=False):
+                    mem_status_md = gr.Markdown(get_mem_status())
+                    with gr.Row():
+                        mem_dd = gr.Dropdown(label="选择后端内存上限（cgroup memory.max）",
+                                             choices=list(MEM_PRESETS.keys()),
+                                             value="24 GB（推荐,T4/云）", scale=3)
+                        mem_apply = gr.Button("应用内存上限", variant="primary", scale=1)
+                    mem_apply.click(fn=apply_mem_preset, inputs=[mem_dd], outputs=[mem_status_md])
+                    mem_apply.click(fn=get_mem_status, outputs=[mem_status_md])
+                    mem_status_timer = gr.Timer(value=5)
+                    mem_status_timer.tick(fn=get_mem_status, outputs=[mem_status_md])
                 with gr.Row():
                     active_df = gr.Dataframe(headers=["取码", "类型", "状态", "已运行"],
                                              label="🗂️ 进行中任务", interactive=False,
