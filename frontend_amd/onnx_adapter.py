@@ -84,6 +84,17 @@ def extract_audio(mp4, out_m4a):
                    check=True, capture_output=True)
     return out_m4a
 
+def extract_all_frames(mp4, out_dir, fps=None):
+    """从视频抽出全部(或按 fps)帧为 PNG(R2I 语义=生成视频截图)。返回帧文件列表。"""
+    os.makedirs(out_dir, exist_ok=True)
+    pattern = os.path.join(out_dir, "frame_%04d.png")
+    cmd = [FFMPEG, "-y", "-i", mp4]
+    if fps:
+        cmd += ["-vf", f"fps={fps}"]
+    cmd += [pattern]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.startswith("frame_"))
+
 def download_output(job_id, dst):
     url = ONNX_BASE + f"/api/jobs/{job_id}/output"
     urllib.request.urlretrieve(url, dst)

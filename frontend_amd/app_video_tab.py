@@ -179,6 +179,101 @@ def refresh_status():
         return "🟠 有任务排队/处理中"
     return "🟢 服务就绪：暂无任务，点击 Generate 开始生成"
 
+# ============ R2I 图片编辑(按说明: 生成视频后抽帧当图) ============
+R2I_PICKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup_r2i")
+os.makedirs(R2I_PICKUP_DIR, exist_ok=True)
+_R2I_JOBS = {}   # code -> status dict
+
+R2I_DEFAULT_PROMPT = (
+    "A cinematic portrait of <Subject 1> from <Picture 1>. "
+    "Realistic, natural skin, soft lighting, high detail, shallow depth of field."
+)
+
+def _exec_r2i(code, prompt, ref_images, seconds, aspect, mp, turbo_steps):
+    global _RUNNING
+    try:
+        # 并行度=1 排队
+        while _RUNNING >= 1:
+            time.sleep(2)
+        _GEN_LOCK.acquire(); _RUNNING = 1
+        try:
+            w, h = resolve_resolution(aspect, mp) if aspect and mp else (256, 256)
+            save_dir = os.path.join(R2I_PICKUP_DIR, code)
+            os.makedirs(save_dir, exist_ok=True)
+            _R2I_JOBS[code] = {"status": "running", "code": code}
+            # 用第一张参考图作为首帧做图生视频(最贴近"保持参考主体")
+            first = ref_images[0] if ref_images else None
+            start_path = None
+            if first and os.path.isfile(first):
+                with open(first, "rb") as f:
+                    start_path = B.upload_image(f.read(), os.path.basename(first))
+            jid = B.submit(prompt=prompt, start_image_path=start_path, steps=int(turbo_steps),
+                           seed=random.randint(0, 2**31 - 1), width=w, height=h,
+                           duration_seconds=float(seconds), use_acceleration_lora=True,
+                           conditioning="first" if start_path else "text")
+            # 轮询直到完成
+            done = False
+            while not done:
+                done, st = B.poll(jid)
+                _R2I_JOBS[code]["status"] = st.get("message") or st.get("status") or "running"
+                if not done:
+                    time.sleep(5)
+            if st.get("status") == "completed":
+                mp4 = os.path.join(save_dir, "video.mp4")
+                B.download_output(jid, mp4)
+                img_dir = os.path.join(save_dir, "images")
+                os.makedirs(img_dir, exist_ok=True)
+                frames = B.extract_all_frames(mp4, img_dir)   # 视频截图当图片
+                audio = os.path.join(save_dir, "audio.m4a")
+                try:
+                    B.extract_audio(mp4, audio)
+                except Exception:
+                    audio = None
+                _R2I_JOBS[code] = {"status": "completed", "code": code,
+                                   "images": frames, "video": mp4, "audio": audio}
+            else:
+                _R2I_JOBS[code]["status"] = f"failed: {st.get('status')}"
+        finally:
+            _RUNNING = 0; _GEN_LOCK.release()
+    except Exception as e:
+        _R2I_JOBS[code] = {"status": f"failed: {e}", "code": code}
+
+def generate_r2i(prompt, r2i_images, seconds, aspect, mp, turbo_steps):
+    code = _new_code()
+    _R2I_JOBS[code] = {"status": "queued", "code": code}
+    imgs = []
+    if r2i_images:
+        imgs = [r2i_images] if isinstance(r2i_images, str) else list(r2i_images)
+    threading.Thread(target=_exec_r2i, args=(code, prompt, imgs, seconds, aspect, mp,
+                     turbo_steps), daemon=True).start()
+    return f"🔑 {code}\n（你的取图码，请复制保存；生成完成后凭码取回图片/视频，24 小时有效）"
+
+def _r2i_result(code):
+    c = str(code or "").strip()
+    if len(str(c).split()) > 1:
+        c = c.split()[1]
+    if not c.isdigit() or len(c) != 6:
+        return [], None, None
+    j = _R2I_JOBS.get(c)
+    if not j or j.get("status") != "completed":
+        return [], None, None
+    imgs = [x for x in j.get("images", []) if os.path.isfile(x)]
+    vid = j.get("video") if os.path.isfile(j.get("video", "")) else None
+    aud = j.get("audio") if j.get("audio") and os.path.isfile(j.get("audio")) else None
+    return imgs, vid, aud
+
+def check_latest_r2i(pickup_code_text):
+    return _r2i_result(pickup_code_text)
+
+def retrieve_r2i(code):
+    return _r2i_result(code)
+
+def _sync_picture_tags_r2i(prompt, files):
+    tags = _tag_img(files)
+    if tags:
+        return f"# 参考图: {tags}\n{prompt or ''}"
+    return prompt
+
 def build():
     with gr.Blocks(title="MiniMax-H3 · ONNX 低显存") as demo:
         gr.Markdown("## MiniMax-H3 · ONNX 低显存 · ref2va 版\n"
@@ -228,9 +323,46 @@ def build():
                 retrieve_audio = gr.Audio(label="🔊 单独音频（可单独下载）", type="filepath")
                 retrieve_btn.click(fn=retrieve_video, inputs=[retrieve_input],
                                    outputs=[retrieve_output, retrieve_audio])
-            # ===== 占位: R2I 与公共监控(后续阶段) =====
+            # ===== Tab 2: R2I 图片编辑(与 AMD 页面一致; 后端=生成视频后抽帧当图) =====
             with gr.Tab("🖼️ R2I 图片编辑"):
-                gr.Markdown("R2I（生成视频并抽帧当图）将在下一阶段接入 ONNX 后端。")
+                gr.Markdown("上传参考图 → 生成视频 → **自动抽帧为图片输出**（按说明：编图=视频截图）。可另取 QC 视频与单独音频。")
+                with gr.Row():
+                    r2i_prompt = gr.Textbox(label="提示词（用 <Picture 1> 引用参考图；可六段式描述主体/运镜/音景）",
+                                            lines=8, value=R2I_DEFAULT_PROMPT)
+                with gr.Row():
+                    r2i_images = gr.File(label="参考图片（多图，可选）", file_count="multiple",
+                                         file_types=["image"], type="filepath")
+                with gr.Row():
+                    r2i_aspect = gr.Dropdown(label="宽高比", choices=list(ASPECT_RATIOS.keys()),
+                                             value="1:1 (Square)")
+                    r2i_mp = gr.Radio(label="分辨率档位", choices=MP_CHOICES, value="0.2 MP（快速）")
+                    r2i_seconds = gr.Slider(label="生成时长（秒）", minimum=1, maximum=5, step=1, value=2)
+                with gr.Row():
+                    r2i_steps = gr.Slider(label="⚡ 快速路线步数（4~8）", minimum=4, maximum=8, value=4, step=1)
+                r2i_run = gr.Button("生成（编辑）图片", variant="primary")
+                r2i_pickup = gr.Textbox(label="🔑 你的取图码（请复制保存；完成后凭码取回图片/视频）",
+                                        value="（点生成后显示取图码）", lines=2, interactive=False)
+                r2i_run.click(fn=generate_r2i, inputs=[r2i_prompt, r2i_images, r2i_seconds,
+                             r2i_aspect, r2i_mp, r2i_steps], outputs=[r2i_pickup])
+                r2i_images.change(fn=_sync_picture_tags_r2i, inputs=[r2i_prompt, r2i_images],
+                                  outputs=[r2i_prompt])
+                with gr.Row():
+                    r2i_latest_gallery = gr.Gallery(label="🖼️ 最新生成图片（视频截图）", columns=3,
+                                                    height="auto", object_fit="contain")
+                    r2i_latest_video = gr.Video(label="▶ QC 视频", format="mp4")
+                    r2i_latest_audio = gr.Audio(label="🔊 单独音频", type="filepath")
+                r2i_timer = gr.Timer(value=3)
+                r2i_timer.tick(fn=check_latest_r2i, inputs=[r2i_pickup],
+                               outputs=[r2i_latest_gallery, r2i_latest_video, r2i_latest_audio])
+                with gr.Row():
+                    r2i_retrieve_in = gr.Textbox(label="输入取图码（6 位数字）", placeholder="如 654321", scale=3)
+                    r2i_retrieve_btn = gr.Button("取回图片/视频", scale=1)
+                r2i_retrieve_out_g = gr.Gallery(label="取回的图片", columns=3, height="auto")
+                r2i_retrieve_out_v = gr.Video(label="取回的视频", format="mp4")
+                r2i_retrieve_out_a = gr.Audio(label="🔊 单独音频", type="filepath")
+                r2i_retrieve_btn.click(fn=retrieve_r2i, inputs=[r2i_retrieve_in],
+                                       outputs=[r2i_retrieve_out_g, r2i_retrieve_out_v,
+                                                r2i_retrieve_out_a])
         log_timer = gr.Timer(value=5)
         log_timer.tick(fn=refresh_status, outputs=[status])
         _cleanup_pickup()
