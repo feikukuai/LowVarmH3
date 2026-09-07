@@ -1,0 +1,12 @@
+# 模型 / 大文件不入 git
+*.safetensors
+*.onnx
+onnx_models/
+exported/
+.h3-workbench/
+.venv/
+
+# 系统产物
+core.*
+__pycache__/
+*.pyc
