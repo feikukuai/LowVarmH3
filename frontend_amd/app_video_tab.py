@@ -31,16 +31,28 @@ MP_CHOICES = ULTRA_LOW_CHOICES + ["0.2 MP（快速）", "0.4 MP（标准）", "0
 
 def is_ultra_low(mp): return str(mp).strip() in ULTRA_LOW_PRESETS
 
+import re as _re
+
+def _parse_mp(megapixels):
+    """把 '0.2 MP（快速）' 这类 label 解析成数值 0.2。"""
+    s = str(megapixels).strip()
+    m = _re.search(r"(\d+(?:\.\d+)?)\s*MP", s)
+    if m:
+        return float(m.group(1))
+    # 兜底: 取字符串里第一个数字
+    m = _re.search(r"(\d+(?:\.\d+)?)", s)
+    return float(m.group(1)) if m else 0.2
+
 def resolve_resolution(aspect_label, megapixels):
     mp_str = str(megapixels).strip()
     if mp_str in ULTRA_LOW_PRESETS:
         return ULTRA_LOW_PRESETS[mp_str]
     w_ratio, h_ratio = ASPECT_RATIOS[aspect_label]
-    total = float(megapixels) * 1024 * 1024
+    total = _parse_mp(megapixels) * 1024 * 1024
     scale = math.sqrt(total / (w_ratio * h_ratio))
     w = round(w_ratio * scale / RES_MULTIPLE) * RES_MULTIPLE
     h = round(h_ratio * scale / RES_MULTIPLE) * RES_MULTIPLE
-    return int(w), int(h)
+    return max(RES_MULTIPLE, int(w)), max(RES_MULTIPLE, int(h))
 
 # ---------- 取码机制 ----------
 PICKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup")
