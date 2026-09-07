@@ -27,12 +27,17 @@ PORT="${2:-7860}"
 
 # 修复1: venv 内 nvidia CUDA 组件 lib 目录
 NVLIB=".venv/lib/python3.11/site-packages/nvidia"
+NVIDIA_FOUND=0
 for d in cudnn cublas cufft curand cusolver cusparse nccl; do
     if [ -d "$PWD/$NVLIB/$d/lib" ]; then
-        export LD_LIBRARY_PATH="$PWD/$NVLIB/$d/lib:${LD_LIBRARY_PATH:-}"
+        export LD_LIBRARY_PATH="$PWD/$NVLIB/$d/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        NVIDIA_FOUND=1
     fi
 done
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/cuda/lib64:/usr/local/cuda-12.2/lib64"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/local/cuda/lib64:/usr/local/cuda-12.2/lib64"
+if [ "$NVIDIA_FOUND" -eq 0 ]; then
+    echo "[launch] ⚠️ 未在 venv 内找到 nvidia cuDNN/cuBLAS lib 目录, CUDA EP 可能加载失败" >&2
+fi
 
 # 修复2: 绕开 T4 上设备常驻 hidden-state 的段错误
 export H3_DEVICE_RESIDENT_HIDDEN=0

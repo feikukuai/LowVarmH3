@@ -58,8 +58,9 @@ def main():
         except Exception as e:
             print("后端进程异常退出:", e); sys.exit(1)
         msg = st.get("message") or st.get("status") or ""
+        prog = st.get("progress")
         if msg != last:
-            print(f"[{st.get('progress'):.3f}] {msg}", flush=True); last = msg
+            print(f"[{(prog if prog is not None else 0):.3f}] {msg}", flush=True); last = msg
         s = st.get("status")
         if s == "completed":
             print("完成。服务器产物:", st["result"]["output"], flush=True)

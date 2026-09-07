@@ -20,7 +20,8 @@ def _http_json(method, path, payload=None, timeout=120, raw=None):
     url = ONNX_BASE + path
     if raw is not None:
         req = urllib.request.Request(url, data=raw, method=method)
-        return req
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
     body = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=body, method=method)
     if payload is not None:

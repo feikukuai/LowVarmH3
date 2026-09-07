@@ -11,7 +11,7 @@
 后端: 通过 onnx_adapter 调 MinimaxH3-ONNX WebUI(默认 http://127.0.0.1:7860)。
 由于 ONNX 后端逐块流式、较慢, 输出用"码 -> job_id"注册表 + 轮询。
 """
-import os, sys, math, random, time, threading, json, shutil
+import os, sys, math, random, time, threading, json
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import onnx_adapter as B  # 后端适配层
 
@@ -161,8 +161,11 @@ def sysinfo():
         r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu",
                             "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
         if r.stdout.strip():
-            name, mu, mt, gu = [x.strip() for x in r.stdout.split(",")]
-            lines.append(f"GPU: {name}  {mu}/{mt}MiB  util {gu}%")
+            rows = [ln for ln in r.stdout.strip().splitlines() if ln.strip()]
+            if rows:
+                name, mu, mt, gu = [x.strip() for x in rows[0].split(",")]
+                gpu_n = f"GPU0: {name}" if len(rows) > 1 else f"GPU: {name}"
+                lines.append(f"{gpu_n}  {mu}/{mt}MiB  util {gu}%")
     except Exception:
         pass
     # backend
@@ -180,6 +183,30 @@ def task_log_html():
 def _is_cancelled(code):
     with _CANCEL_LOCK:
         return code in _CANCEL
+
+def _upload_refs(ref_images, ref_video, ref_audios):
+    """上传引用资源, 返回 references 列表(供 submit references= 参数)。"""
+    refs = []
+    if ref_images:
+        files = ref_images if isinstance(ref_images, list) else [ref_images]
+        for i, fp in enumerate(files, 1):
+            if fp and os.path.isfile(fp):
+                try:
+                    path = B.upload_image(fp)
+                    refs.append({"type": "image", "path": path, "index": i})
+                except Exception as e:
+                    add_log(f"⚠️ 上传参考图失败: {e}")
+    if ref_video:
+        # ref_video 来自 gr.Video, 可能是路径或 dict
+        vp = ref_video if isinstance(ref_video, str) else (ref_video.get("path") if isinstance(ref_video, dict) else None)
+        if vp and os.path.isfile(str(vp)):
+            refs.append({"type": "video", "path": str(vp)})
+    if ref_audios:
+        files = ref_audios if isinstance(ref_audios, list) else [ref_audios]
+        for fp in files:
+            if fp and os.path.isfile(str(fp)):
+                refs.append({"type": "audio", "path": str(fp)})
+    return refs
 
 def _exec_gen(code, prompt, ref_images, ref_video, ref_audios, seconds, aspect, mp, turbo_steps):
     global _RUNNING
@@ -200,12 +227,29 @@ def _exec_gen(code, prompt, ref_images, ref_video, ref_audios, seconds, aspect, 
                 return
             with _ACTIVE_LOCK:
                 _ACTIVE[code]["start"] = time.time(); _ACTIVE[code]["status"] = "running"
-            # Ref2VA Turbo 4-step LoRA adapter 已导出(acceleration_ready=True)。
-            lora = True
-            jid = B.submit(prompt=prompt, start_image_path=None, steps=int(turbo_steps),
+            # 检查后端 turbo LoRA 就绪状态
+            lora = bool(turbo_steps and int(turbo_steps) <= 8)
+            if lora:
+                try:
+                    lora = B.onnx_profile_generation_ready()
+                except Exception:
+                    pass
+            # 上传引用资源(ref2va)
+            references = _upload_refs(ref_images, ref_video, ref_audios)
+            # 首帧图上传
+            start_path = None
+            if ref_images:
+                first = ref_images[0] if isinstance(ref_images, list) else ref_images
+                if first and os.path.isfile(first):
+                    try:
+                        start_path = B.upload_image(first)
+                    except Exception as e:
+                        add_log(f"⚠️ 上传首帧图失败: {e}")
+            jid = B.submit(prompt=prompt, start_image_path=start_path, steps=int(turbo_steps),
                            seed=random.randint(0, 2**31 - 1),
                            width=w, height=h, duration_seconds=float(seconds),
-                           use_acceleration_lora=lora)
+                           use_acceleration_lora=lora,
+                           references=references if references else None)
             with _JOBS_LOCK:
                 _JOBS[code]["jid"] = jid
                 _JOBS[code]["status"] = "running"
@@ -231,7 +275,6 @@ def _poll_and_store(code, jid):
         done, st = B.poll(jid)
         if done:
             if st.get("status") == "completed":
-                mp4 = B.get_video_path(jid)
                 local = os.path.join(PICKUP_DIR, f"{code}.mp4")
                 B.download_output(jid, local)
                 audio = os.path.join(PICKUP_DIR, f"{code}.m4a")
@@ -388,8 +431,7 @@ def _exec_r2i(code, prompt, ref_images, duration_seconds, use_lora, follow_ref, 
             first = ref_images[0] if ref_images else None
             start_path = None
             if first and os.path.isfile(first):
-                with open(first, "rb") as f:
-                    start_path = B.upload_image(f.read(), os.path.basename(first))
+                start_path = B.upload_image(first)
             steps = 4 if use_lora else 20   # AMD: LoRA开=4步(turbo)/关=20步
             jid = B.submit(prompt=prompt, start_image_path=start_path, steps=int(steps),
                            seed=random.randint(0, 2**31 - 1), width=w, height=h,

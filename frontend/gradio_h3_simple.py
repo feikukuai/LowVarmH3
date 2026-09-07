@@ -5,7 +5,7 @@
 依赖:  gradio>=4, requests (已装到 .venv)
 后端须已用 launch-webui-linux.sh 启动并完成模型导出。
 """
-import argparse, json, time, threading, urllib.request, urllib.error, urllib.parse, os, uuid
+import argparse, json, time, urllib.request, urllib.parse, os
 
 import gradio as gr
 import requests
@@ -75,7 +75,7 @@ def _run(prompt, start_image, steps, seed, width, height, dur):
         prog = st.get("progress")
         if msg != last:
             last = msg
-            yield f"[{prog:.1%}] {msg}", None
+            yield f"[{(prog if prog is not None else 0):.1%}] {msg}", None
         s = st.get("status")
         if s == "completed":
             out = st["result"]["output"]

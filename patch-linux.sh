@@ -10,14 +10,17 @@ if [ ! -f "$PP" ]; then
 fi
 cp "$PP" "$PP.bak"
 python3 - <<'PY'
-import io
 p="pyproject.toml"
 t=open(p).read()
 if "sys_platform == 'linux'" in t:
     print("已包含 linux，无需修改")
 else:
-    t=t.replace("environments = [\"sys_platform == 'win32'\"]",
-                "environments = [\"sys_platform == 'win32'\", \"sys_platform == 'linux'\"]")
-    open(p,"w").write(t)
+    new=t.replace("environments = [\"sys_platform == 'win32'\"]",
+                  "environments = [\"sys_platform == 'win32'\", \"sys_platform == 'linux'\"]")
+    if new == t:
+        import sys
+        print("⚠️ 未能匹配 pyproject.toml 中的 environments 行, 请手动检查格式" >&2 if False else "未能匹配 environments 行, 未做修改", file=sys.stderr)
+        sys.exit(1)
+    open(p,"w").write(new)
     print("pyproject.toml 已加入 linux 平台支持")
 PY

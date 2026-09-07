@@ -79,11 +79,6 @@ LowVarmH3/
     └── RUNNING_NOTES.md         # 🆕 实测跑通记录(时间/分辨率/耗时, 供社区参考)
 ```
 > 📄 想看**真实跑通耗时/分辨率**请直接看 [`docs/RUNNING_NOTES.md`](docs/RUNNING_NOTES.md)。
-│   ├── app_video_tab.py         # AMD 风格完整前端(7862): 🎬视频+R2I+任务&监控, 后端走 onnx_adapter
-│   └── onnx_adapter.py          # 同上适配层(带抽帧/取音频等扩展)
-└── docs/
-    └── MODELS_AND_PATHS.md      # 模型下载源 + 放置路径 + 导出产物清单
-```
 
 > 本仓库只包含「让 MinimaxH3-ONNX 在 Linux/低显存跑通」的补丁与脚本，**不包含模型文件**(几十 GB，请按 MODELS_AND_PATHS 下载)。
 
