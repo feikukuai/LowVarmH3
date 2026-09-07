@@ -227,13 +227,16 @@ def _exec_gen(code, prompt, ref_images, ref_video, ref_audios, seconds, aspect, 
                 return
             with _ACTIVE_LOCK:
                 _ACTIVE[code]["start"] = time.time(); _ACTIVE[code]["status"] = "running"
-            # 检查后端 turbo LoRA 就绪状态
+            # turbo 步数(4-8)要求后端 Ref2VA Turbo 4-step LoRA adapter。
+            # 保持原行为: <=8 步一律按 LoRA 提交(后端已导出才可用);
+            # 若就绪检查报告不可用, 仅警告不改行为(避免非LoRA路径 + 4步导致 failed)。
             lora = bool(turbo_steps and int(turbo_steps) <= 8)
             if lora:
                 try:
-                    lora = B.onnx_profile_generation_ready()
-                except Exception:
-                    pass
+                    if not B.onnx_profile_generation_ready():
+                        add_log("⚠️ 后端未报告 generation_ready, turbo LoRA 可能不可用; 仍按 turbo 提交")
+                except Exception as e:
+                    add_log(f"⚠️ 检查 turbo LoRA 就绪失败(忽略): {e}")
             # 上传引用资源(ref2va)
             references = _upload_refs(ref_images, ref_video, ref_audios)
             # 首帧图上传
@@ -286,9 +289,10 @@ def _poll_and_store(code, jid):
                     _JOBS[code].update(status="completed", out_mp4=local, audio=audio)
                 add_log(f"🎬 视频任务 {code} 完成 -> {local}")
             else:
+                err = st.get("message") or st.get("error") or st.get("status") or "failed"
                 with _JOBS_LOCK:
-                    _JOBS[code]["status"] = f"failed: {st.get('status')}"
-                add_log(f"🎬 视频任务 {code} 失败: {st.get('status')}")
+                    _JOBS[code]["status"] = f"failed: {err}"
+                add_log(f"🎬 视频任务 {code} 失败: {err}")
             return
         msg = st.get("message") or ""
         if msg != last:
@@ -465,8 +469,10 @@ def _exec_r2i(code, prompt, ref_images, duration_seconds, use_lora, follow_ref, 
                                        "images": frames, "video": mp4, "audio": audio}
                 add_log(f"R2I 任务 {code} 完成: {len(frames)} 张图片")
             else:
+                err = st.get("message") or st.get("error") or st.get("status") or "failed"
                 with _R2I_JOBS_LOCK:
-                    _R2I_JOBS[code]["status"] = f"failed: {st.get('status')}"
+                    _R2I_JOBS[code]["status"] = f"failed: {err}"
+                add_log(f"R2I 任务 {code} 失败: {err}")
         finally:
             _RUNNING = 0; _GEN_LOCK.release()
     except Exception as e:
