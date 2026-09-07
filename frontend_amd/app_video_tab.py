@@ -67,19 +67,129 @@ def _cleanup_pickup(max_age_h=24, max_codes=200):
         for c in [k for k, v in _JOBS.items() if now - v["created"] > max_age_h * 3600][:200]:
             _JOBS.pop(c, None)
 
+# ============ 任务监控: 进行中任务 / 日志 / 系统 / 一键取消(个人使用, 点即取消) ============
+_ACTIVE = {}          # code -> {mode, created, start, status}
+_ACTIVE_LOCK = threading.Lock()
+_CANCEL = set()       # 被点 ✕ 取消的 code
+_CANCEL_LOCK = threading.Lock()
+LOG = []
+LOG_LOCK = threading.Lock()
+LOG_MAX = 200
+
+def add_log(msg):
+    ts = time.strftime("%H:%M:%S")
+    with LOG_LOCK:
+        LOG.append(f"[{ts}] {msg}")
+        del LOG[: max(0, len(LOG) - LOG_MAX)]
+    return "\n".join(LOG)
+
+def active_list():
+    with _ACTIVE_LOCK:
+        now = time.time()
+        out = []
+        for c, v in list(_ACTIVE.items()):
+            if v["status"] in ("completed", "failed", "cancelled"):
+                continue
+            el = int(now - (v.get("start") or now))
+            out.append([c, v.get("mode", ""), v.get("status", ""), f"{el}s"])
+        return out
+
+def cancel_code(code):
+    """个人使用: 点 ✕ 直接取消指定任务(前端停止轮询并标记取消)。"""
+    c = str(code or "").strip()
+    if len(str(c).split()) > 1:
+        c = c.split()[1]
+    if not c.isdigit():
+        return f"无法取消: 无效码 {code}"
+    with _CANCEL_LOCK:
+        _CANCEL.add(c)
+    with _JOBS_LOCK:
+        if c in _JOBS:
+            _JOBS[c]["status"] = "cancelled"
+    with _R2I_JOBS_LOCK:
+        if c in _R2I_JOBS:
+            _R2I_JOBS[c]["status"] = "cancelled"
+    add_log(f"✕ 已取消任务 {c}（后端该条可能继续跑完，界面立即释放）")
+    return f"已取消 {c}"
+
+def cancel_latest():
+    """取消最近提交的一个进行中任务。"""
+    with _ACTIVE_LOCK:
+        running = [c for c, v in _ACTIVE.items()
+                   if v["status"] not in ("completed", "failed", "cancelled")]
+    if not running:
+        return "当前无进行中任务"
+    latest = max(running, key=lambda c: _ACTIVE[c].get("start") or 0)
+    return cancel_code(latest)
+
+def sysinfo():
+    """系统监控: CPU/内存/GPU/后端。返回 markdown 字符串。"""
+    lines = []
+    # CPU
+    try:
+        with open("/proc/loadavg") as f:
+            load = f.read().split()[:3]
+        lines.append(f"CPU 负载: {' '.join(load)}")
+    except Exception:
+        pass
+    # mem
+    try:
+        with open("/proc/meminfo") as f:
+            d = {}
+            for ln in f:
+                k, v = ln.split(":", 1)
+                d[k.strip()] = int(v.split()[0]) / 1048576
+        used = d.get("MemTotal", 0) - d.get("MemAvailable", 0)
+        lines.append(f"内存: {used:.1f} / {d.get('MemTotal', 0):.1f} GiB")
+    except Exception:
+        pass
+    # gpu
+    try:
+        import subprocess
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu",
+                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            name, mu, mt, gu = [x.strip() for x in r.stdout.split(",")]
+            lines.append(f"GPU: {name}  {mu}/{mt}MiB  util {gu}%")
+    except Exception:
+        pass
+    # backend
+    try:
+        lines.append("后端: " + ("✅ 就绪" if B.onnx_health() else "⚠️ 离线"))
+    except Exception:
+        pass
+    return "  |  ".join(lines)
+
+def task_log_html():
+    with LOG_LOCK:
+        return "\n".join(LOG[-60:]) or "（暂无日志）"
+
 # ---------- 生成(后台线程, 并行度1) ----------
+def _is_cancelled(code):
+    with _CANCEL_LOCK:
+        return code in _CANCEL
+
 def _exec_gen(code, prompt, ref_images, ref_video, ref_audios, seconds, aspect, mp, turbo_steps):
     global _RUNNING
     try:
+        with _ACTIVE_LOCK:
+            _ACTIVE[code] = {"mode": "video", "created": time.time(), "start": time.time(),
+                             "status": "queued"}
+        add_log(f"🎬 视频任务 {code} 入队")
         w, h = resolve_resolution(aspect, mp) if aspect and mp else (256, 256)
         # 并行度=1 排队门控
         while _RUNNING >= 1:
+            if _is_cancelled(code):
+                return
             time.sleep(2)
         _GEN_LOCK.acquire(); _RUNNING = 1
         try:
+            if _is_cancelled(code):
+                return
+            with _ACTIVE_LOCK:
+                _ACTIVE[code]["start"] = time.time(); _ACTIVE[code]["status"] = "running"
             # Ref2VA Turbo 4-step LoRA adapter 已导出(acceleration_ready=True)。
-            # 用 turbo 快速路线时开启 use_acceleration_lora(4步最佳; 步数由 turbo_steps 控制)。
-            lora = True   # adapter 已就绪, turbo 快速路线开启
+            lora = True
             jid = B.submit(prompt=prompt, start_image_path=None, steps=int(turbo_steps),
                            seed=random.randint(0, 2**31 - 1),
                            width=w, height=h, duration_seconds=float(seconds),
@@ -87,16 +197,25 @@ def _exec_gen(code, prompt, ref_images, ref_video, ref_audios, seconds, aspect, 
             with _JOBS_LOCK:
                 _JOBS[code]["jid"] = jid
                 _JOBS[code]["status"] = "running"
+            add_log(f"视频任务 {code} 已提交后端(jid={jid[:8]}…)，开始生成")
             _poll_and_store(code, jid)
         finally:
             _RUNNING = 0; _GEN_LOCK.release()
     except Exception as e:
         with _JOBS_LOCK:
             _JOBS[code]["status"] = f"failed: {e}"
+        add_log(f"视频任务 {code} 失败: {e}")
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE[code]["status"] = _JOBS.get(code, {}).get("status", "done")
 
 def _poll_and_store(code, jid):
     last = ""
     while True:
+        if _is_cancelled(code):
+            with _JOBS_LOCK:
+                _JOBS[code]["status"] = "cancelled"
+            return
         done, st = B.poll(jid)
         if done:
             if st.get("status") == "completed":
@@ -110,9 +229,11 @@ def _poll_and_store(code, jid):
                     audio = None
                 with _JOBS_LOCK:
                     _JOBS[code].update(status="completed", out_mp4=local, audio=audio)
+                add_log(f"🎬 视频任务 {code} 完成 -> {local}")
             else:
                 with _JOBS_LOCK:
                     _JOBS[code]["status"] = f"failed: {st.get('status')}"
+                add_log(f"🎬 视频任务 {code} 失败: {st.get('status')}")
             return
         msg = st.get("message") or ""
         if msg != last:
@@ -183,6 +304,7 @@ def refresh_status():
 R2I_PICKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup_r2i")
 os.makedirs(R2I_PICKUP_DIR, exist_ok=True)
 _R2I_JOBS = {}   # code -> status dict
+_R2I_JOBS_LOCK = threading.Lock()
 
 R2I_DEFAULT_PROMPT = (
     "A cinematic portrait of <Subject 1> from <Picture 1>. "
@@ -192,16 +314,25 @@ R2I_DEFAULT_PROMPT = (
 def _exec_r2i(code, prompt, ref_images, seconds, aspect, mp, turbo_steps):
     global _RUNNING
     try:
-        # 并行度=1 排队
+        with _ACTIVE_LOCK:
+            _ACTIVE[code] = {"mode": "r2i", "created": time.time(), "start": time.time(),
+                             "status": "queued"}
+        add_log(f"🖼️ R2I 任务 {code} 入队")
         while _RUNNING >= 1:
+            if _is_cancelled(code):
+                return
             time.sleep(2)
         _GEN_LOCK.acquire(); _RUNNING = 1
         try:
+            if _is_cancelled(code):
+                return
+            with _ACTIVE_LOCK:
+                _ACTIVE[code]["start"] = time.time(); _ACTIVE[code]["status"] = "running"
             w, h = resolve_resolution(aspect, mp) if aspect and mp else (256, 256)
             save_dir = os.path.join(R2I_PICKUP_DIR, code)
             os.makedirs(save_dir, exist_ok=True)
-            _R2I_JOBS[code] = {"status": "running", "code": code}
-            # 用第一张参考图作为首帧做图生视频(最贴近"保持参考主体")
+            with _R2I_JOBS_LOCK:
+                _R2I_JOBS[code] = {"status": "running", "code": code}
             first = ref_images[0] if ref_images else None
             start_path = None
             if first and os.path.isfile(first):
@@ -211,11 +342,16 @@ def _exec_r2i(code, prompt, ref_images, seconds, aspect, mp, turbo_steps):
                            seed=random.randint(0, 2**31 - 1), width=w, height=h,
                            duration_seconds=float(seconds), use_acceleration_lora=True,
                            conditioning="first" if start_path else "text")
-            # 轮询直到完成
+            add_log(f"R2I 任务 {code} 已提交后端(jid={jid[:8]}…)")
             done = False
             while not done:
+                if _is_cancelled(code):
+                    with _R2I_JOBS_LOCK:
+                        _R2I_JOBS[code]["status"] = "cancelled"
+                    return
                 done, st = B.poll(jid)
-                _R2I_JOBS[code]["status"] = st.get("message") or st.get("status") or "running"
+                with _R2I_JOBS_LOCK:
+                    _R2I_JOBS[code]["status"] = st.get("message") or st.get("status") or "running"
                 if not done:
                     time.sleep(5)
             if st.get("status") == "completed":
@@ -229,14 +365,22 @@ def _exec_r2i(code, prompt, ref_images, seconds, aspect, mp, turbo_steps):
                     B.extract_audio(mp4, audio)
                 except Exception:
                     audio = None
-                _R2I_JOBS[code] = {"status": "completed", "code": code,
-                                   "images": frames, "video": mp4, "audio": audio}
+                with _R2I_JOBS_LOCK:
+                    _R2I_JOBS[code] = {"status": "completed", "code": code,
+                                       "images": frames, "video": mp4, "audio": audio}
+                add_log(f"R2I 任务 {code} 完成: {len(frames)} 张图片")
             else:
-                _R2I_JOBS[code]["status"] = f"failed: {st.get('status')}"
+                with _R2I_JOBS_LOCK:
+                    _R2I_JOBS[code]["status"] = f"failed: {st.get('status')}"
         finally:
             _RUNNING = 0; _GEN_LOCK.release()
     except Exception as e:
-        _R2I_JOBS[code] = {"status": f"failed: {e}", "code": code}
+        with _R2I_JOBS_LOCK:
+            _R2I_JOBS[code] = {"status": f"failed: {e}", "code": code}
+        add_log(f"R2I 任务 {code} 失败: {e}")
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE[code]["status"] = _R2I_JOBS.get(code, {}).get("status", "done")
 
 def generate_r2i(prompt, r2i_images, seconds, aspect, mp, turbo_steps):
     code = _new_code()
@@ -363,6 +507,32 @@ def build():
                 r2i_retrieve_btn.click(fn=retrieve_r2i, inputs=[r2i_retrieve_in],
                                        outputs=[r2i_retrieve_out_g, r2i_retrieve_out_v,
                                                 r2i_retrieve_out_a])
+            # ===== Tab 3: 任务与监控 =====
+            with gr.Tab("📋 任务 & 监控"):
+                gr.Markdown("个人使用：**在下方选进行中任务 → 点 ✕ 取消**；或点「✕ 取消最新」。取消后界面立即释放。")
+                sysmon_md = gr.Markdown("读取系统信息…")
+                with gr.Row():
+                    active_df = gr.Dataframe(headers=["取码", "类型", "状态", "已运行"],
+                                             label="🗂️ 进行中任务", interactive=False,
+                                             wrap=True)
+                with gr.Row():
+                    cancel_dd = gr.Dropdown(label="选择要取消的任务（选码）", choices=[], scale=3)
+                    cancel_sel = gr.Button("✕ 取消选中任务", variant="stop", scale=1)
+                    cancel_latest_btn = gr.Button("✕ 取消最新任务", variant="stop", scale=1)
+                cancel_msg = gr.Markdown("")
+                task_log = gr.Textbox(label="📋 任务日志", lines=14, interactive=False)
+                # 轮询刷新
+                mon_timer = gr.Timer(value=3)
+                def _refresh_all():
+                    acts = active_list()
+                    return (sysinfo(), acts, [a[0] for a in acts], task_log_html())
+                mon_timer.tick(fn=_refresh_all,
+                               outputs=[sysmon_md, active_df, cancel_dd, task_log])
+                cancel_sel.click(fn=cancel_code, inputs=[cancel_dd], outputs=[cancel_msg])
+                cancel_latest_btn.click(fn=cancel_latest, outputs=[cancel_msg])
+                # 日志也在顶部刷新
+                log_timer2 = gr.Timer(value=5)
+                log_timer2.tick(fn=task_log_html, outputs=[task_log])
         log_timer = gr.Timer(value=5)
         log_timer.tick(fn=refresh_status, outputs=[status])
         _cleanup_pickup()
