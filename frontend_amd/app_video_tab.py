@@ -77,13 +77,13 @@ def _exec_gen(code, prompt, ref_images, ref_video, ref_audios, seconds, aspect, 
             time.sleep(2)
         _GEN_LOCK.acquire(); _RUNNING = 1
         try:
-            # 注: use_acceleration_lora 需后端先导出 ref2va turbo adapter(stage3 接入)。
-            # 阶段1先不强制开 turbo LoRA, 以免后端报错; 步数用 turbo_steps(4~8)。
-            lora = bool(os.environ.get("H3_TURBO_LORA_READY"))
+            # Ref2VA Turbo 4-step LoRA adapter 已导出(acceleration_ready=True)。
+            # 用 turbo 快速路线时开启 use_acceleration_lora(4步最佳; 步数由 turbo_steps 控制)。
+            lora = True   # adapter 已就绪, turbo 快速路线开启
             jid = B.submit(prompt=prompt, start_image_path=None, steps=int(turbo_steps),
                            seed=random.randint(0, 2**31 - 1),
                            width=w, height=h, duration_seconds=float(seconds),
-                           use_acceleration_lora=lora)  # 仅当 adapter 就绪才开启
+                           use_acceleration_lora=lora)
             with _JOBS_LOCK:
                 _JOBS[code]["jid"] = jid
                 _JOBS[code]["status"] = "running"
