@@ -30,7 +30,7 @@
 git clone --depth 1 https://github.com/MARK42IRPC/MinimaxH3-ONNX.git h3
 cd h3
 # 应用 Linux 支持补丁(pyproject.toml 原版 [tool.uv].environments 仅允许 win32)
-git apply ../LowVarmH3/pyproject.linux.patch   # 或手动把 environments 改成含 'linux'
+bash /path/to/LowVarmH3/patch-linux.sh          # 把 environments 改成含 'linux'
 uv lock --python 3.11
 uv sync --locked --extra dev --no-editable --python 3.11
 ```
@@ -69,20 +69,65 @@ LowVarmH3/
 ├── scripts/
 │   └── verify_and_generate.py   # 端到端出片验证脚本(HTTP)
 ├── frontend/
-│   ├── gradio_h3_simple.py      # 可跑通的 Gradio 前端(文生/首帧→视频, 端口7861)
-│   └── onnx_adapter.py          # ONNX 后端适配层(翻译成 7860 调用, AMD风格前端移植基座)
+│   ├── gradio_h3_simple.py      # 简单版 Gradio 前端(文生/首帧→视频, 7861, 已验证)
+│   └── onnx_adapter.py          # ONNX 后端适配层(把前端调用翻译成 7860)
+├── frontend_amd/
+│   ├── app_video_tab.py         # AMD 风格完整前端(7862): 🎬视频+R2I+任务&监控, 后端走 onnx_adapter
+│   └── onnx_adapter.py          # 同上适配层(带抽帧/取音频等扩展)
 └── docs/
     └── MODELS_AND_PATHS.md      # 模型下载源 + 放置路径 + 导出产物清单
 ```
 
 > 本仓库只包含「让 MinimaxH3-ONNX 在 Linux/低显存跑通」的补丁与脚本，**不包含模型文件**(几十 GB，请按 MODELS_AND_PATHS 下载)。
 
-## 四、Gradio 前端(可选)
-简单版(已验证可出片)：
+## 四、Gradio 前端
+
+### A. AMD 风格完整前端（推荐，三 Tab，7862）
+```bash
+# 先启动后端(见上节 4)
+cd <MinimaxH3-ONNX 目录>
+.venv/bin/python gradio_frontend_amd/app_video_tab.py \
+    --backend http://127.0.0.1:7860 --host 127.0.0.1 --port 7862
+# 打开 http://127.0.0.1:7862
+```
+功能（页面/控件向 AMD MiniMax-H3 前端对齐）：
+| Tab | 功能 |
+|---|---|
+| 🎬 视频生成 | prompt、多图参考、参考视频(≤5s)、多段参考音频、宽高比(8种)、分辨率档位(含⚡32×32超低)、时长、⚡快速步数4-8、🔑取码、凭码取回、最新视频+单独音频、`<Picture N>` 自动标签同步 |
+| 🖼️ R2I 图片编辑 | 多图参考、六段式提示词、🔑取图码、图片 Gallery、QC 视频、单独音频、凭码取回（后端=生成视频→ffmpeg 抽帧当图） |
+| 📋 任务 & 监控 | 系统监控(CPU/内存/GPU/后端)、进行中任务表、✕ 一键取消(个人使用无需输码)、任务日志 |
+
+- **turbo LoRA**：需后端已导出 Ref2VA Turbo 4-step adapter（`/api/jobs/download-export` preset `ref2va_turbo_v0_1`，后端 `acceleration_ready=True`），前端自动开启 `use_acceleration_lora`。
+- 取消为**前端软取消**（停止轮询+界面释放）；后端已提交那条可能继续跑完（后端无 cancel API）。
+
+### B. 简单版前端（最小，7861，已验证出片）
 ```bash
 cd <MinimaxH3-ONNX 目录>
-.venv/bin/python LowVarmH3/frontend/gradio_h3_simple.py \
+.venv/bin/python gradio_frontend/gradio_h3_simple.py \
     --backend http://127.0.0.1:7860 --host 127.0.0.1 --port 7861
-# 打开 http://127.0.0.1:7861 即可在网页里改提示词/首帧/参数并生成视频
 ```
-`onnx_adapter.py` 是把前端从 ComfyUI 换成 ONNX 的翻译层，供完整复刻版前端使用。
+`onnx_adapter.py` 是把前端从 ComfyUI 换成 ONNX 的翻译层。
+
+---
+
+## 五、开机自动启动（仅限腾讯 Cloud Studio 等支持 `preview.yml` 的空间）
+
+把下面追加到你的 `.vscode/preview.yml`（工作空间打开即自动拉起后端+前端，前端 `autoOpen:true` 默认打开）：
+
+```yaml
+  # ---- MiniMax-H3 ONNX 后端 (FastAPI, 7860) ----
+  - port: 7860
+    run: ./launch-webui-linux.sh 127.0.0.1 7860
+    root: ./MinimaxH3-ONNX          # 按你实际 checkout 路径改
+    name: H3-ONNX-Backend
+    autoOpen: false
+  # ---- MiniMax-H3 AMD 风格前端 (Gradio, 7862) ----
+  - port: 7862
+    run: /abs/path/to/MinimaxH3-ONNX/.venv/bin/python app_video_tab.py \
+         --backend http://127.0.0.1:7860 --host 127.0.0.1 --port 7862
+    root: ./MinimaxH3-ONNX/gradio_frontend_amd
+    name: H3-Frontend
+    autoOpen: true
+```
+
+> ⚠️ **注意**：`preview.yml` 是 **腾讯 Cloud Studio 的自动启动机制**，仅适用于这类空间。**其它环境（本地机、Colab、普通 Docker 等）不适用**，请按各自情况改用 systemd / supervisor / `nohup` / 启动脚本自行拉起这两个服务。路径（`./MinimaxH3-ONNX` 等）也需按你实际目录调整。
