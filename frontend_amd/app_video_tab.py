@@ -430,6 +430,47 @@ def _sync_picture_tags_r2i(prompt, files):
         return f"# 参考图: {tags}\n{prompt or ''}"
     return prompt
 
+def _extract_code(code_text):
+    c = str(code_text or "").strip()
+    if len(str(c).split()) > 1:
+        c = c.split()[1]
+    c = c.strip()
+    return c if c.isdigit() and len(c) == 6 else None
+
+def _nice_progress(status):
+    """把后端 job 状态/message 加工成前端可读进度行。"""
+    s = str(status or "")
+    if s in ("queued", "running", "completed", "cancelled"):
+        return f"🟡 {s}…"
+    # 后端 message 形如: 'Ref2VA: main_block_37_attention_qkv' / 'Qwen: MLP' 等
+    # 提取 block 编号高亮
+    import re as _re
+    m = _re.search(r"main_block_(\d+)_([a-z_]+)", s)
+    if m:
+        block, op = int(m.group(1)), m.group(2)
+        return f"🎬 {s}  (主块 {block}/50 · {op})"
+    return f"🟡 {s}"
+
+def progress_for_video(code_text):
+    c = _extract_code(code_text)
+    if not c:
+        return "🟢 就绪：点 Generate 开始生成（此区会实时显示 block 进度）"
+    with _JOBS_LOCK:
+        v = _JOBS.get(c)
+    if not v:
+        return "🟡 等待任务初始化…"
+    return _nice_progress(v.get("status"))
+
+def progress_for_r2i(code_text):
+    c = _extract_code(code_text)
+    if not c:
+        return "🟢 就绪：上传参考图后点生成"
+    with _R2I_JOBS_LOCK:
+        v = _R2I_JOBS.get(c)
+    if not v:
+        return "🟡 等待任务初始化…"
+    return _nice_progress(v.get("status"))
+
 def build():
     with gr.Blocks(title="MiniMax-H3 · ONNX 低显存") as demo:
         gr.Markdown("## MiniMax-H3 · ONNX 低显存 · ref2va 版\n"
@@ -466,6 +507,9 @@ def build():
                              seconds, aspect_ratio, megapixels, turbo_steps],
                              outputs=[pickup_code])
                 ref_images.change(fn=_sync_picture_tags_video, inputs=[prompt, ref_images], outputs=[prompt])
+                prog_md = gr.Markdown("🟢 就绪：点 Generate 开始生成（此区实时显示 block 进度）")
+                prog_timer = gr.Timer(value=3)
+                prog_timer.tick(fn=progress_for_video, inputs=[pickup_code], outputs=[prog_md])
                 latest_output = gr.Video(label="▶ 最新生成的视频（仅当前页面；刷新后请凭码取回）", format="mp4")
                 latest_audio = gr.Audio(label="🔊 单独音频（仅当前页面，可单独下载）", type="filepath")
                 latest_timer = gr.Timer(value=3)
@@ -502,6 +546,9 @@ def build():
                              r2i_aspect, r2i_mp, r2i_steps], outputs=[r2i_pickup])
                 r2i_images.change(fn=_sync_picture_tags_r2i, inputs=[r2i_prompt, r2i_images],
                                   outputs=[r2i_prompt])
+                r2i_prog_md = gr.Markdown("🟢 就绪：上传参考图后点生成（此区实时显示 block 进度）")
+                r2i_prog_timer = gr.Timer(value=3)
+                r2i_prog_timer.tick(fn=progress_for_r2i, inputs=[r2i_pickup], outputs=[r2i_prog_md])
                 with gr.Row():
                     r2i_latest_gallery = gr.Gallery(label="🖼️ 最新生成图片（视频截图）", columns=3,
                                                     height="auto", object_fit="contain")
