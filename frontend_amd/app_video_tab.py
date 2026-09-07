@@ -539,8 +539,14 @@ def set_mem_limit(gb):
         except Exception as e:
             return f"❌ 设置失败: {e}"
 
-def apply_mem_preset(label):
-    gb = MEM_PRESETS.get(str(label), 0)
+def apply_mem_number(gb):
+    # gb 为 None 或 <=0 视为"不限制"
+    try:
+        gb = int(float(gb or 0))
+    except Exception:
+        gb = 0
+    if gb <= 0:
+        return set_mem_limit(0)
     return set_mem_limit(gb)
 
 def build():
@@ -644,13 +650,12 @@ def build():
                 sysmon_md = gr.Markdown("读取系统信息…")
                 with gr.Accordion("💾 后端内存上限设置（适配不同设备）", open=False):
                     mem_status_md = gr.Markdown(get_mem_status())
+                    gr.Markdown("**手动输入内存上限（GB）**，输入后点“应用”。参考：T4/云=24，16GB 机=12~16，内存紧张机越小越稳；**填 0 = 不限制**。")
                     with gr.Row():
-                        mem_dd = gr.Dropdown(label="选择后端内存上限（cgroup memory.max）",
-                                             choices=list(MEM_PRESETS.keys()),
-                                             value="24 GB（推荐,T4/云）", scale=3)
+                        mem_input = gr.Number(label="后端内存上限 (GB)，0=不限制", value=24, minimum=0,
+                                              precision=0, scale=2)
                         mem_apply = gr.Button("应用内存上限", variant="primary", scale=1)
-                    mem_apply.click(fn=apply_mem_preset, inputs=[mem_dd], outputs=[mem_status_md])
-                    mem_apply.click(fn=get_mem_status, outputs=[mem_status_md])
+                    mem_apply.click(fn=apply_mem_number, inputs=[mem_input], outputs=[mem_status_md])
                     mem_status_timer = gr.Timer(value=5)
                     mem_status_timer.tick(fn=get_mem_status, outputs=[mem_status_md])
                 with gr.Row():
