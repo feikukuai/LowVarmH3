@@ -65,6 +65,7 @@ python scripts/verify_and_generate.py            # 提交一个最小任务并�
 ```
 LowVarmH3/
 ├── launch-webui-linux.sh        # 关键修复版 Linux 启动脚本(3 个修复固化)
+├── run-h3-backend-24gb.sh       # 24GB cgroup 内存上限后端启动(解决宿主OOM)
 ├── patch-linux.sh               # MinimaxH3-ONNX → Linux 平台支持(pyproject)
 ├── scripts/
 │   └── verify_and_generate.py   # 端到端出片验证脚本(HTTP)
@@ -72,6 +73,12 @@ LowVarmH3/
 │   ├── gradio_h3_simple.py      # 简单版 Gradio 前端(文生/首帧→视频, 7861, 已验证)
 │   └── onnx_adapter.py          # ONNX 后端适配层(把前端调用翻译成 7860)
 ├── frontend_amd/
+│   └── app_video_tab.py         # AMD 风格完整前端(3 Tab + block进度 + 内存上限设置)
+└── docs/
+    ├── MODELS_AND_PATHS.md      # 模型下载源 + 放置路径 + 导出产物清单
+    └── RUNNING_NOTES.md         # 🆕 实测跑通记录(时间/分辨率/耗时, 供社区参考)
+```
+> 📄 想看**真实跑通耗时/分辨率**请直接看 [`docs/RUNNING_NOTES.md`](docs/RUNNING_NOTES.md)。
 │   ├── app_video_tab.py         # AMD 风格完整前端(7862): 🎬视频+R2I+任务&监控, 后端走 onnx_adapter
 │   └── onnx_adapter.py          # 同上适配层(带抽帧/取音频等扩展)
 └── docs/
