@@ -29,7 +29,35 @@ ULTRA_LOW_PRESETS = {"⚡ 超低 32×32（最低像素，仅音频）": (32, 32)
 ULTRA_LOW_CHOICES = list(ULTRA_LOW_PRESETS.keys())
 MP_CHOICES = ULTRA_LOW_CHOICES + ["0.2 MP（快速）", "0.4 MP（标准）", "0.6 MP", "0.8 MP", "1.0 MP（高清）"]
 
+# ---- T4 16GB 显存安全上限 ----
+# ONNX 后端逐块流式，main_block / VAE 阶段峰值显存随 latent 面积近似线性增长。
+# 实测：长边 640(≈0.23MP) 稳跑(main_block≈3.5GB)；长边 1024 会 OOM(≈14.7GB)。
+# 因此任何提交给后端的 width/height 都钳制到该安全范围，避免跑到一半才 BFCArena 失败。
+SAFE_MAX_SIDE = 768            # 长边像素上限(32 对齐后生效)
+SAFE_MAX_PIXELS = int(0.35 * 1024 * 1024)  # 像素上限，防止超方形裁切逼近 768
+
 def is_ultra_low(mp): return str(mp).strip() in ULTRA_LOW_PRESETS
+
+def _clamp_safe(w, h):
+    """把 (w,h) 限制在 T4 安全显存内：像素数<=SAFE_MAX_PIXELS 且长边<=SAFE_MAX_SIDE，32 对齐并尽量保持宽高比。"""
+    w, h = int(w), int(h)
+    if w <= 0 or h <= 0:
+        return 640, 360
+    w2, h2 = w, h
+    for _ in range(4):  # 大步等比缩放(长边+面积各取一个缩放因子取 min)，收敛快、比例失真小
+        k = 1.0
+        if max(w, h) > SAFE_MAX_SIDE:
+            k = min(k, SAFE_MAX_SIDE / float(max(w, h)))
+        if w * h > SAFE_MAX_PIXELS:
+            k = min(k, math.sqrt(SAFE_MAX_PIXELS / float(w * h)))
+        w = max(1, int(w * k)); h = max(1, int(h * k))
+        # 向下 32 对齐
+        w2 = max(RES_MULTIPLE, int(w // RES_MULTIPLE) * RES_MULTIPLE)
+        h2 = max(RES_MULTIPLE, int(h // RES_MULTIPLE) * RES_MULTIPLE)
+        if w2 * h2 <= SAFE_MAX_PIXELS and max(w2, h2) <= SAFE_MAX_SIDE:
+            return w2, h2
+        w, h = w2, h2  # 对齐后若仍超(极少)，以对齐值为基准再缩
+    return w2, h2
 
 import re as _re
 
@@ -52,7 +80,8 @@ def resolve_resolution(aspect_label, megapixels):
     scale = math.sqrt(total / (w_ratio * h_ratio))
     w = round(w_ratio * scale / RES_MULTIPLE) * RES_MULTIPLE
     h = round(h_ratio * scale / RES_MULTIPLE) * RES_MULTIPLE
-    return max(RES_MULTIPLE, int(w)), max(RES_MULTIPLE, int(h))
+    # 手动 MP 档同样钳制到 T4 安全范围(防止高 MP 档在 main_block 阶段 OOM)
+    return _clamp_safe(max(RES_MULTIPLE, int(w)), max(RES_MULTIPLE, int(h)))
 
 # ---------- 取码机制 ----------
 PICKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pickup")
@@ -393,7 +422,12 @@ N/A
 #   [reference generation] Place <Subject 1> in the environment of <Subject 2>."""
 
 def _pick_aspect_mp(follow_ref, aspect_label, megapixels, ref_images):
-    """按 AMD 语义决定分辨率：跟随参考图分辨率(读图尺寸) 或 手动 aspect×MP。"""
+    """按 AMD 语义决定分辨率：跟随参考图分辨率(读图尺寸) 或 手动 aspect×MP。
+
+    注意(T4 16GB 显存保护)：不能把参考图长边直接放到 1024——ONNX 后端逐块流式
+    在 main_block 阶段峰值显存随 latent 面积近似线性增长，1024 长边会 OOM(实测 ~14.7GB)。
+    因此跟随参考图时保持其宽高比、再经 _clamp_safe 整体缩放到安全范围并 32 对齐。
+    """
     if follow_ref and ref_images:
         try:
             from PIL import Image
@@ -401,9 +435,8 @@ def _pick_aspect_mp(follow_ref, aspect_label, megapixels, ref_images):
             if os.path.isfile(p0):
                 with Image.open(p0) as im:
                     w, h = im.size
-                w = max(32, int(round(w / 32) * 32))
-                h = max(32, int(round(h / 32) * 32))
-                return min(w, 1024), min(h, 1024)
+                if w > 0 and h > 0:
+                    return _clamp_safe(w, h)
         except Exception:
             pass
         return 256, 256
